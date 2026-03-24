@@ -1,0 +1,133 @@
+version: '3.8'
+
+# Aegis OS - Local Development Stack
+# Run: docker-compose up -d
+
+services:
+  # vLLM for local LLM inference
+  vllm:
+    image: vllm/vllm-openai:latest
+    container_name: aegis-vllm
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - HF_TOKEN=${HF_TOKEN:-}
+    command: >
+      --model meta-llama/Llama-3.3-70B-Instruct
+      --tensor-parallel-size 4
+      --max-model-len 32768
+      --enable-prefix-caching
+      --trust-remote-code
+    ports:
+      - "8000:8000"
+    volumes:
+      - vllm-cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # DragonflyDB (Redis-compatible)
+  dragonfly:
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:latest
+    container_name: aegis-dragonfly
+    command: >
+      --maxmemory 8gb
+      --proactor_threads 4
+    ports:
+      - "6379:6379"
+    volumes:
+      - dragonfly-data:/data
+
+  # PostgreSQL + pgvector
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: aegis-postgres
+    environment:
+      POSTGRES_USER: aegis
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aegis_dev_password}
+      POSTGRES_DB: aegis
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aegis"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Qdrant vector store
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: aegis-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant-data:/qdrant/storage
+
+  # Apache Superset
+  superset:
+    image: apache/superset:latest
+    container_name: aegis-superset
+    environment:
+      - SUPERSET_SECRET_KEY=${SUPERSET_SECRET_KEY:-aegis_superset_secret}
+      - DATABASE_URL=postgresql://aegis:${POSTGRES_PASSWORD:-aegis_dev_password}@postgres:5432/aegis
+    ports:
+      - "8088:8088"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Prometheus
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: aegis-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+
+  # Grafana
+  grafana:
+    image: grafana/grafana:latest
+    container_name: aegis-grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+
+  # Jaeger tracing
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: aegis-jaeger
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "16686:16686"
+      - "4317:4317"
+
+volumes:
+  vllm-cache:
+  dragonfly-data:
+  postgres-data:
+  qdrant-data:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  default:
+    name: aegis-network
